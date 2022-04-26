@@ -37,6 +37,7 @@ dependencies:
   flutter_libserialport: ^0.2.3
   syncfusion_flutter_charts: ^20.1.50
   intl: ^0.17.0
+  dart_periphery: ^0.9.1
 
 dev_dependencies:
   flutter_test:
