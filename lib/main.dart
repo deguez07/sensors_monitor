@@ -1,10 +1,13 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:math';
+import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_libserialport/flutter_libserialport.dart';
 import 'package:intl/intl.dart';
 import 'package:sensors_monitor/data_measurement.dart';
+import 'package:sensors_monitor/utilities.dart';
 import 'package:syncfusion_flutter_charts/charts.dart';
 
 void main() {
@@ -43,19 +46,30 @@ class _HomeScreenState extends State<HomeScreen> {
   /// The max number of entries to display in a chart
   static const maxEntries = 10;
 
+  late SerialPortConfig _portConfig;
+
   /// The port currently selected for reading data
   String? _selectedPort;
+
+  SerialPort? _activePort;
 
   /// Mock timer used for testing purposes
   Timer? _mockTimer;
 
-  List<DataMeasurement> _oxygenData = [];
+  /// True if there is data being read in the [_selectedPort]
+  bool _isReadingSelectedPort = false;
 
-  List<DataMeasurement> _co2Data = [];
+  bool _hasOverflow = false;
 
-  List<DataMeasurement> _flowData = [];
+  StreamSubscription<Uint8List>? _activePortDataSubscription;
 
-  List<DataMeasurement> _m25Data = [];
+  final List<DataMeasurement> _oxygenData = [];
+
+  final List<DataMeasurement> _co2Data = [];
+
+  final List<DataMeasurement> _flowData = [];
+
+  final List<DataMeasurement> _m25Data = [];
 
   /// Returns the list of available ports as a list of [DropdownMenuItem]s
   List<DropdownMenuItem<String>> get _availablePortsMenuItems {
@@ -120,12 +134,125 @@ class _HomeScreenState extends State<HomeScreen> {
     _appendValue(DataMeasurement(m25, timestamp), _m25Data);
   }
 
+  _startReadingPort() {
+    if (_selectedPort == null || _isReadingSelectedPort) {
+      return;
+    }
+
+    setState(() {
+      _isReadingSelectedPort = true;
+    });
+    print('Start reading port');
+
+    try {
+      _activePort = SerialPort(_selectedPort!);
+      _setupPortConfig();
+      _activePort?.config = _portConfig; // SerialPortConfig.fromAddress(_activePort!.address);
+      print('stopBits: ${_activePort?.config.stopBits}');
+      print('baudRate: ${_activePort?.config.baudRate}');
+      _activePort?.flush();
+      _activePort?.close();
+
+      if (_activePort!.isOpen || _activePort!.openReadWrite()) {
+        print('Ready to read!');
+        _hasOverflow = false;
+        final portReader = SerialPortReader(_activePort!);
+        _activePortDataSubscription = portReader.stream.listen((event) { 
+
+          if (!_hasOverflow && event.indexWhere((asciiIndex) => asciiIndex > 127) != -1) {
+            print('Overflow detected');
+            //_hasOverflow = true;
+            //_activePort?.flush();
+          }
+
+          final fixedList = event.map((asciiIndex) {
+            final inRangeIndex = _hasOverflow ? (asciiIndex + 138) % 256 : asciiIndex;
+            return inRangeIndex;
+          }).toList();
+
+          print('Apply overflow: $_hasOverflow');
+          print(fixedList);
+          // print(String.fromCharCodes(event));
+          // final data = AsciiDecoder().convert(event);
+
+          print(event);
+        }, 
+          onError: (err) {
+            print('Error reading port');
+            setState(() {
+              _selectedPort = null;
+              _isReadingSelectedPort = false;
+              _activePortDataSubscription = null;
+            });
+            _activePort?.dispose();
+          },
+          cancelOnError: true
+        );
+      } else {
+        print(SerialPort.lastError);
+        _activePort?.close();
+        _activePort?.dispose();
+        setState(() {
+          _isReadingSelectedPort = false;
+        });
+      }
+    } catch (err) {
+      print(err);
+      print('Could not read port');
+      setState(() {
+        _isReadingSelectedPort = false;
+      });
+    }
+  }
+
+  _stopReadingPort() {
+    if (_selectedPort == null || !_isReadingSelectedPort) {
+      return null;
+    }
+    print('Stop reading port');
+    
+
+    setState(() {
+      _activePortDataSubscription?.cancel();
+      _isReadingSelectedPort = false;
+    });
+
+    _activePort?.close();
+    _activePort?.dispose();
+  }
+
+  _setupPortConfig() {
+    _portConfig = SerialPortConfig();
+    _portConfig.baudRate = 9600;
+    _portConfig.bits = 8;
+    _portConfig.stopBits = 1;
+    _portConfig.parity = SerialPortParity.none;
+    // _portConfig.rts = SerialPortRts.off;
+    // _portConfig.xonXoff = SerialPortXonXoff.disabled;
+    // _portConfig.cts = SerialPortCts.invalid;
+    // _portConfig.setFlowControl(SerialPortFlowControl.none);
+    _portConfig.stopBits = 1;
+
+    
+  }
+
   @override
   void initState() {
+
     _mockTimer = Timer.periodic(const Duration(seconds: 1), (timer) { 
       final mockO2Value = Random().nextDouble() * 100;
       _addDataMeasurements(mockO2Value, mockO2Value, mockO2Value, mockO2Value, DateTime.now()); 
     });
+
+    _setupPortConfig();
+
+    final arduinoPort = getFirstProbableArduinoPort();
+    if (arduinoPort != null) {
+      _selectedPort = arduinoPort;
+      print('Arduino is connected to port: $arduinoPort');
+      // Start reading port
+    }
+
     super.initState();
   }
 
@@ -200,7 +327,7 @@ class _HomeScreenState extends State<HomeScreen> {
                               hint: const Text('Select a port'),
                               value: _selectedPort,
                               items: _availablePortsMenuItems,
-                              onChanged: (value) {
+                              onChanged: _isReadingSelectedPort ? null : (value) {
                                 setState(() {
                                   _selectedPort = value;
                                 });
@@ -209,10 +336,18 @@ class _HomeScreenState extends State<HomeScreen> {
                             if (!hasAvailablePorts) const Text('No devices dectected... Connect a device and try again')
                           ],
                         ),
-                        IconButton(
-                          icon: const Icon(Icons.play_circle),
+                        if (hasAvailablePorts) IconButton(
+                          icon: Icon(_isReadingSelectedPort ? Icons.stop_circle : Icons.play_circle),
                           onPressed: _selectedPort == null ? null : () {
-                            print('Start reading port');
+                            if (_isReadingSelectedPort) {
+                              _stopReadingPort();
+                            } else {
+                              _startReadingPort();
+                            }
+
+                            // setState(() {
+                            //   _isReadingSelectedPort = !_isReadingSelectedPort;
+                            // });
                           },
                         )
                       ],
