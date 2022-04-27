@@ -1,10 +1,12 @@
 import 'dart:async';
-import 'dart:math';
+import 'dart:io';
 
+import 'package:dart_periphery/dart_periphery.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_libserialport/flutter_libserialport.dart';
 import 'package:intl/intl.dart';
 import 'package:sensors_monitor/data_measurement.dart';
+import 'package:sensors_monitor/utilities.dart';
 import 'package:syncfusion_flutter_charts/charts.dart';
 
 void main() {
@@ -43,19 +45,25 @@ class _HomeScreenState extends State<HomeScreen> {
   /// The max number of entries to display in a chart
   static const maxEntries = 10;
 
-  /// The port currently selected for reading data
-  String? _selectedPort;
+  /// The data read through the serial port
+  String _serialDataBuffer = '';
+
+  /// The port name currently selected
+  String? _selectedPortName;
+
+  /// The port from which data is being extracted
+  Serial? _activePort;
 
   /// Mock timer used for testing purposes
   Timer? _mockTimer;
 
-  List<DataMeasurement> _oxygenData = [];
+  final List<DataMeasurement> _oxygenData = [];
 
-  List<DataMeasurement> _co2Data = [];
+  final List<DataMeasurement> _co2Data = [];
 
-  List<DataMeasurement> _flowData = [];
+  final List<DataMeasurement> _flowData = [];
 
-  List<DataMeasurement> _m25Data = [];
+  final List<DataMeasurement> _pm25Data = [];
 
   /// Returns the list of available ports as a list of [DropdownMenuItem]s
   List<DropdownMenuItem<String>> get _availablePortsMenuItems {
@@ -113,25 +121,142 @@ class _HomeScreenState extends State<HomeScreen> {
 
   /// Adds the list of measurements to their respective lists
   /// TODO: finish implmentation and look for optimizations
-  _addDataMeasurements(double o2, double co2, double flow, double m25, DateTime timestamp) {
+  _addDataMeasurements(double o2, double co2, double flow, double pm25, DateTime timestamp) {
     _appendValue(DataMeasurement(o2, timestamp), _oxygenData);
     _appendValue(DataMeasurement(co2, timestamp), _co2Data);
     _appendValue(DataMeasurement(flow, timestamp), _flowData);
-    _appendValue(DataMeasurement(m25, timestamp), _m25Data);
+    _appendValue(DataMeasurement(pm25, timestamp), _pm25Data);
+  }
+
+  _startReadingPort() {
+    if (_selectedPortName == null || _activePort != null || !Platform.isLinux) {
+      return;
+    }
+
+    try {
+      final port = Serial(_selectedPortName!, Baudrate.b9600);
+      port.flush();
+
+      setState(() {
+        _activePort = port;
+      });
+
+    } catch (err) {
+      print('Could not _startReadingPort');
+      print(err);
+    }
+  }
+
+  _stopReadingPort() {
+    if (_activePort == null || !Platform.isLinux) {
+      return null;
+    }
+
+    _activePort?.dispose();
+    
+    setState(() {
+      _serialDataBuffer = '';
+      _activePort = null;
+    });
+  }
+
+  
+  _parseAndAppendData(String incomingData) {
+    _serialDataBuffer += incomingData;
+
+    // Terminate changes if there is no data in the serial buffer
+    if (_serialDataBuffer.isEmpty) {
+      return;
+    }
+
+    // Check if data needs to be added
+    final lineBreakIndex = _serialDataBuffer.indexOf('\n');
+    if (lineBreakIndex == -1) {
+      return; 
+    }
+
+    final newDataString = _serialDataBuffer.substring(0, lineBreakIndex);
+    _serialDataBuffer = _serialDataBuffer.substring(lineBreakIndex + 1, _serialDataBuffer.length);
+
+    final newData = newDataString.split(',');
+    if (newData.length != 5) {
+      return; //Something went wrong
+    }
+
+    // Parse the data and add it if valid
+    try {
+      final o2 = double.parse(newData[0]);
+      final co2 = double.parse(newData[1]);
+      final flow = double.parse(newData[2]);
+      final pm25 = double.parse(newData[3]);
+
+      _addDataMeasurements(o2, co2, flow, pm25, DateTime.now());
+    } catch (err) {
+      print(err);
+    }
+  }
+
+
+  _showReadingErrorDialog() {
+    showDialog(
+      context: context, 
+      builder: (dialogContext) {
+        return AlertDialog(
+          title: const Text('No se pudo leer el dispositivo!'),
+          content: const Text('Revisa que el puerto seleccionado sea el correcto e intenta de nuevo. Si los problemas persisten intenta reconectar el microcontrolador'),
+          actions: [
+            TextButton(
+              child: const Text('Ok'),
+              onPressed: () {
+                Navigator.of(dialogContext).pop();
+              },
+            )
+          ],
+        );
+      }
+    );
   }
 
   @override
   void initState() {
-    _mockTimer = Timer.periodic(const Duration(seconds: 1), (timer) { 
-      final mockO2Value = Random().nextDouble() * 100;
-      _addDataMeasurements(mockO2Value, mockO2Value, mockO2Value, mockO2Value, DateTime.now()); 
+
+    _mockTimer = Timer.periodic(const Duration(milliseconds: 600), (timer) { 
+      // final mockO2Value = Random().nextDouble() * 100;
+      // _addDataMeasurements(mockO2Value, mockO2Value, mockO2Value, mockO2Value, DateTime.now()); 
+
+      // Read the port if it is available
+      if (_activePort != null) {
+
+        try {
+          final serialData = _activePort!.read(64, 100);
+          if (serialData.count != 0) {
+            final utf8Data = serialData.uf8ToString();
+            // print(utf8Data);
+            _parseAndAppendData(utf8Data);
+          }
+        } catch (err) {
+          print('Failed to read data');
+          print(err);
+          _stopReadingPort();
+          _showReadingErrorDialog();
+        }
+        
+      }
     });
+
+    final arduinoPort = getFirstProbableArduinoPort();
+    if (arduinoPort != null) {
+      _selectedPortName = arduinoPort;
+      print('Arduino is connected to port: $arduinoPort');
+    }
+
     super.initState();
   }
 
   @override
   void dispose() {
     _mockTimer?.cancel();
+    _activePort?.dispose();
     super.dispose();
   }
 
@@ -156,13 +281,13 @@ class _HomeScreenState extends State<HomeScreen> {
             Expanded(
               flex: 1,
               child: Padding(
-                padding: const EdgeInsets.all(8.0),
+                padding: EdgeInsets.all(8.0),
                 child: TabBarView(
                   children: [
                     _buildChart('O2', 'Tiempo', 'PPM', _oxygenData),
                     _buildChart('CO2', 'Tiempo', 'PPM', _co2Data),
-                    _buildChart('Flujo', 'Tiempo', 'ml/s', _flowData),
-                    _buildChart('M2.5', 'Tiempo', 'Otra Unidad', _m25Data),
+                    _buildChart('Flujo', 'Tiempo', 'L/min', _flowData),
+                    _buildChart('PM2.5', 'Tiempo', 'PPM', _pm25Data),
                   ],
                 ),
               ),
@@ -198,21 +323,25 @@ class _HomeScreenState extends State<HomeScreen> {
                             ),
                             if (hasAvailablePorts) DropdownButton<String>(
                               hint: const Text('Select a port'),
-                              value: _selectedPort,
+                              value: _selectedPortName,
                               items: _availablePortsMenuItems,
-                              onChanged: (value) {
+                              onChanged: _activePort != null ? null : (value) {
                                 setState(() {
-                                  _selectedPort = value;
+                                  _selectedPortName = value;
                                 });
                               },
                             ),
                             if (!hasAvailablePorts) const Text('No devices dectected... Connect a device and try again')
                           ],
                         ),
-                        IconButton(
-                          icon: const Icon(Icons.play_circle),
-                          onPressed: _selectedPort == null ? null : () {
-                            print('Start reading port');
+                        if (hasAvailablePorts) IconButton(
+                          icon: Icon(_activePort == null ? Icons.play_circle : Icons.stop_circle),
+                          onPressed: _selectedPortName == null ? null : () {
+                            if (_activePort != null) {
+                              _stopReadingPort();
+                            } else {
+                              _startReadingPort();
+                            }
                           },
                         )
                       ],
