@@ -45,17 +45,15 @@ class _HomeScreenState extends State<HomeScreen> {
   /// The max number of entries to display in a chart
   static const maxEntries = 10;
 
-  /// The data read through the serial port
-  String _serialDataBuffer = '';
+  /// The line of data read by the serial interface
+  String _dataLine = '';
 
-  /// The port name currently selected
-  String? _selectedPortName;
+  /// Timer used to fetch data from the serial port
+  Timer? _dataFetchTimer;
 
-  /// The port from which data is being extracted
-  Serial? _activePort;
+  // The serial port where data is being read
+  Serial? _serialPort;
 
-  /// Mock timer used for testing purposes
-  Timer? _mockTimer;
 
   final List<DataMeasurement> _oxygenData = [];
 
@@ -67,21 +65,13 @@ class _HomeScreenState extends State<HomeScreen> {
 
   final List<DataMeasurement> _pm25Data = [];
 
-  /// Returns the list of available ports as a list of [DropdownMenuItem]s
-  List<DropdownMenuItem<String>> get _availablePortsMenuItems {
-    return SerialPort.availablePorts.map((portName) => DropdownMenuItem(
-      child: Text(portName),
-      value: portName,
-    )).toList();
-  }
-
   /// Builds a chart with the given parameters
   Widget _buildChart(String title, String xAxisTitle, String yAxisTitle, List<DataMeasurement> chartData) {
 
     return SfCartesianChart(
       title: ChartTitle(text: title),
       primaryXAxis: DateTimeCategoryAxis(
-        dateFormat: DateFormat('hh:mm:ss.s'),
+        dateFormat: DateFormat('hh:mm:ss.S'),
         title: AxisTitle(
           text: xAxisTitle
         )
@@ -89,14 +79,15 @@ class _HomeScreenState extends State<HomeScreen> {
       primaryYAxis: NumericAxis(
         title: AxisTitle(
           text: yAxisTitle
-        )
+        ),
+        rangePadding: ChartRangePadding.additional
       ),
       series: <SplineSeries<DataMeasurement, DateTime>> [
         SplineSeries<DataMeasurement, DateTime>(
           dataSource: chartData, 
           xValueMapper: (data, _) => data.timestamp, 
           yValueMapper: (data, _) => data.value,
-          animationDuration: 500
+          animationDuration: 0
         )
       ]
     );
@@ -131,58 +122,17 @@ class _HomeScreenState extends State<HomeScreen> {
     _appendValue(DataMeasurement(smf3019, timestamp), _smf3019Data);
   }
 
-  _startReadingPort() {
-    if (_selectedPortName == null || _activePort != null || !Platform.isLinux) {
-      return;
-    }
-
-    try {
-      final port = Serial(_selectedPortName!, Baudrate.b9600);
-      port.flush();
-
-      setState(() {
-        _activePort = port;
-      });
-
-    } catch (err) {
-      print('Could not _startReadingPort');
-      print(err);
-    }
-  }
-
-  _stopReadingPort() {
-    if (_activePort == null || !Platform.isLinux) {
-      return null;
-    }
-
-    _activePort?.dispose();
-    
-    setState(() {
-      _serialDataBuffer = '';
-      _activePort = null;
-    });
-  }
-
-  
   _parseAndAppendData(String incomingData) {
-    _serialDataBuffer += incomingData;
+    // print('Adding new data');
 
     // Terminate changes if there is no data in the serial buffer
-    if (_serialDataBuffer.isEmpty) {
+    if (incomingData.isEmpty) {
       return;
     }
 
-    // Check if data needs to be added
-    final lineBreakIndex = _serialDataBuffer.indexOf('\n');
-    if (lineBreakIndex == -1) {
-      return; 
-    }
-
-    final newDataString = _serialDataBuffer.substring(0, lineBreakIndex);
-    _serialDataBuffer = _serialDataBuffer.substring(lineBreakIndex + 1, _serialDataBuffer.length);
-
-    final newData = newDataString.split(',');
-    if (newData.length != 5) {
+    final newData = incomingData.split(',');
+    if (newData.length != 6) {
+      print('Could not add new data');
       return; //Something went wrong
     }
 
@@ -200,72 +150,65 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
-
-  _showReadingErrorDialog() {
-    showDialog(
-      context: context, 
-      builder: (dialogContext) {
-        return AlertDialog(
-          title: const Text('No se pudo leer el dispositivo!'),
-          content: const Text('Revisa que el puerto seleccionado sea el correcto e intenta de nuevo. Si los problemas persisten intenta reconectar el microcontrolador'),
-          actions: [
-            TextButton(
-              child: const Text('Ok'),
-              onPressed: () {
-                Navigator.of(dialogContext).pop();
-              },
-            )
-          ],
-        );
-      }
-    );
-  }
-
   @override
   void initState() {
 
-    _mockTimer = Timer.periodic(const Duration(milliseconds: 1000), (timer) { 
-      // final mockO2Value = Random().nextDouble() * 100;
-      // _addDataMeasurements(mockO2Value, mockO2Value, mockO2Value, mockO2Value, DateTime.now()); 
-
-      // Read the port if it is available
-      if (_activePort != null) {
-
-        try {
-          final serialData = _activePort!.read(64, 300);
-          if (serialData.count != 0) {
-            final utf8Data = serialData.uf8ToString();
-            // print(utf8Data);
-            _parseAndAppendData(utf8Data);
-          }
-        } catch (err) {
-          print('Failed to read data');
-          print(err);
-          _stopReadingPort();
-          _showReadingErrorDialog();
-        }
-        
-      }
-    });
-
-    final arduinoPort = getFirstProbableArduinoPort();
-    if (arduinoPort != null) {
-      _selectedPortName = arduinoPort;
-      print('Arduino is connected to port: $arduinoPort');
+    try {
+      _serialPort = Serial('/dev/ttyUSB0', Baudrate.b9600);
+    } catch(err) {
+      print(err);
+      print('Error could not open /dev/ttyUSB0');
     }
+
+    _dataFetchTimer = Timer.periodic(const Duration(milliseconds: 20), (timer) {
+      if (_serialPort == null) {
+        return;
+      }
+
+      try {
+        final serialEvent = _serialPort!.read(1, 5);
+
+        for (final byteData in serialEvent.data) {
+          final byteChar = String.fromCharCode(byteData);
+
+          if (byteChar == '\n') {
+            print(_dataLine);
+            _parseAndAppendData(_dataLine);
+            _dataLine = '';
+          } else {
+            _dataLine += byteChar;
+          }
+        }
+      } catch (err) {
+        // LIBRARY HAS A BUG... Will throw an
+        // print(err);
+        // print('Failed to read data');
+      }
+
+      
+    });
 
     super.initState();
   }
 
   @override
   void dispose() {
-    _mockTimer?.cancel();
-    _activePort?.dispose();
+    _dataFetchTimer?.cancel();
+    _serialPort?.dispose();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
+
+    if (_serialPort == null) {
+      return const Scaffold(
+        body: Center(
+          child: Text("Device has not been detected at /dev/ttyUSB0.\nReconnect and restart the App"),
+        ),
+      );
+    }
+
     return DefaultTabController(
       length: 5,
       child: Scaffold(
@@ -298,64 +241,64 @@ class _HomeScreenState extends State<HomeScreen> {
                 ),
               ),
             ),
-            Padding(
-              padding: const EdgeInsets.only(
-                left: 8,
-                right: 8,
-                bottom: 8
-              ),
-              child: Padding(
-                padding: const EdgeInsets.symmetric(
-                  vertical: 8.0,
-                  horizontal: 16.0
-                ),
-                child: Builder(
-                  builder: (context) {
-                    final hasAvailablePorts = SerialPort.availablePorts.isNotEmpty;
+            // Padding(
+            //   padding: const EdgeInsets.only(
+            //     left: 8,
+            //     right: 8,
+            //     bottom: 8
+            //   ),
+            //   child: Padding(
+            //     padding: const EdgeInsets.symmetric(
+            //       vertical: 8.0,
+            //       horizontal: 16.0
+            //     ),
+            //     child: Builder(
+            //       builder: (context) {
+            //         final hasAvailablePorts = SerialPort.availablePorts.isNotEmpty;
 
-                    return Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                      children: [
-                        Row(
-                          mainAxisAlignment: MainAxisAlignment.start,
-                          children: [
-                            if (hasAvailablePorts) Padding(
-                              padding: const EdgeInsets.only(
-                                right: 8
-                              ),
-                              child: Text('Port:',
-                                style: Theme.of(context).textTheme.bodyText1,
-                              ),
-                            ),
-                            if (hasAvailablePorts) DropdownButton<String>(
-                              hint: const Text('Select a port'),
-                              value: _selectedPortName,
-                              items: _availablePortsMenuItems,
-                              onChanged: _activePort != null ? null : (value) {
-                                setState(() {
-                                  _selectedPortName = value;
-                                });
-                              },
-                            ),
-                            if (!hasAvailablePorts) const Text('No devices dectected... Connect a device and try again')
-                          ],
-                        ),
-                        if (hasAvailablePorts) IconButton(
-                          icon: Icon(_activePort == null ? Icons.play_circle : Icons.stop_circle),
-                          onPressed: _selectedPortName == null ? null : () {
-                            if (_activePort != null) {
-                              _stopReadingPort();
-                            } else {
-                              _startReadingPort();
-                            }
-                          },
-                        )
-                      ],
-                    );
-                  }
-                ),
-              ),
-            )
+            //         return Row(
+            //           mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            //           children: [
+            //             Row(
+            //               mainAxisAlignment: MainAxisAlignment.start,
+            //               children: [
+            //                 if (hasAvailablePorts) Padding(
+            //                   padding: const EdgeInsets.only(
+            //                     right: 8
+            //                   ),
+            //                   child: Text('Port:',
+            //                     style: Theme.of(context).textTheme.bodyText1,
+            //                   ),
+            //                 ),
+            //                 if (hasAvailablePorts) DropdownButton<String>(
+            //                   hint: const Text('Select a port'),
+            //                   value: _selectedPortName,
+            //                   items: _availablePortsMenuItems,
+            //                   onChanged: _activePort != null ? null : (value) {
+            //                     setState(() {
+            //                       _selectedPortName = value;
+            //                     });
+            //                   },
+            //                 ),
+            //                 if (!hasAvailablePorts) const Text('No devices dectected... Connect a device and try again')
+            //               ],
+            //             ),
+            //             if (hasAvailablePorts) IconButton(
+            //               icon: Icon(_activePort == null ? Icons.play_circle : Icons.stop_circle),
+            //               onPressed: _selectedPortName == null ? null : () {
+            //                 if (_activePort != null) {
+            //                   _stopReadingPort();
+            //                 } else {
+            //                   _startReadingPort();
+            //                 }
+            //               },
+            //             )
+            //           ],
+            //         );
+            //       }
+            //     ),
+            //   ),
+            // )
           ],
         )
       ),
