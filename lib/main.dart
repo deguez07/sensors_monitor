@@ -61,7 +61,9 @@ class _HomeScreenState extends State<HomeScreen> {
 
   final List<DataMeasurement> _co2Data = [];
 
-  final List<DataMeasurement> _flowData = [];
+  final List<DataMeasurement> _smf3200Data = [];
+
+  final List<DataMeasurement> _smf3019Data = [];
 
   final List<DataMeasurement> _pm25Data = [];
 
@@ -79,7 +81,7 @@ class _HomeScreenState extends State<HomeScreen> {
     return SfCartesianChart(
       title: ChartTitle(text: title),
       primaryXAxis: DateTimeCategoryAxis(
-        dateFormat: DateFormat('hh:mm:ss'),
+        dateFormat: DateFormat('hh:mm:ss.s'),
         title: AxisTitle(
           text: xAxisTitle
         )
@@ -121,11 +123,12 @@ class _HomeScreenState extends State<HomeScreen> {
 
   /// Adds the list of measurements to their respective lists
   /// TODO: finish implmentation and look for optimizations
-  _addDataMeasurements(double o2, double co2, double flow, double pm25, DateTime timestamp) {
+  _addDataMeasurements(double o2, double co2, double smf3200, double smf3019, double pm25, DateTime timestamp) {
     _appendValue(DataMeasurement(o2, timestamp), _oxygenData);
     _appendValue(DataMeasurement(co2, timestamp), _co2Data);
-    _appendValue(DataMeasurement(flow, timestamp), _flowData);
+    _appendValue(DataMeasurement(smf3200, timestamp), _smf3200Data);
     _appendValue(DataMeasurement(pm25, timestamp), _pm25Data);
+    _appendValue(DataMeasurement(smf3019, timestamp), _smf3019Data);
   }
 
   _startReadingPort() {
@@ -187,10 +190,11 @@ class _HomeScreenState extends State<HomeScreen> {
     try {
       final o2 = double.parse(newData[0]);
       final co2 = double.parse(newData[1]);
-      final flow = double.parse(newData[2]);
-      final pm25 = double.parse(newData[3]);
+      final flowSmf3019 = double.parse(newData[2]);
+      final flowSmf3200 = double.parse(newData[3]);
+      final pm25 = double.parse(newData[4]);
 
-      _addDataMeasurements(o2, co2, flow, pm25, DateTime.now());
+      _addDataMeasurements(o2, co2, flowSmf3200, flowSmf3019, pm25, DateTime.now());
     } catch (err) {
       print(err);
     }
@@ -220,7 +224,7 @@ class _HomeScreenState extends State<HomeScreen> {
   @override
   void initState() {
 
-    _mockTimer = Timer.periodic(const Duration(milliseconds: 600), (timer) { 
+    _mockTimer = Timer.periodic(const Duration(milliseconds: 1000), (timer) { 
       // final mockO2Value = Random().nextDouble() * 100;
       // _addDataMeasurements(mockO2Value, mockO2Value, mockO2Value, mockO2Value, DateTime.now()); 
 
@@ -228,7 +232,7 @@ class _HomeScreenState extends State<HomeScreen> {
       if (_activePort != null) {
 
         try {
-          final serialData = _activePort!.read(64, 100);
+          final serialData = _activePort!.read(64, 300);
           if (serialData.count != 0) {
             final utf8Data = serialData.uf8ToString();
             // print(utf8Data);
@@ -263,15 +267,16 @@ class _HomeScreenState extends State<HomeScreen> {
   @override
   Widget build(BuildContext context) {
     return DefaultTabController(
-      length: 4,
+      length: 5,
       child: Scaffold(
         appBar: AppBar(
           bottom: const TabBar(
             tabs: [
-              Tab(text: 'O',),
+              Tab(text: 'O2',),
               Tab(text: 'CO2',),
-              Tab(text: 'Flujo',),
-              Tab(text: 'M2.5',)
+              Tab(text: 'Flujo (SMF3200)',),
+              Tab(text: 'Flujo (SMF3019)',),
+              Tab(text: 'PM2.5',)
             ],
           ),
           toolbarHeight: 0,
@@ -286,7 +291,8 @@ class _HomeScreenState extends State<HomeScreen> {
                   children: [
                     _buildChart('O2', 'Tiempo', 'PPM', _oxygenData),
                     _buildChart('CO2', 'Tiempo', 'PPM', _co2Data),
-                    _buildChart('Flujo', 'Tiempo', 'L/min', _flowData),
+                    _buildChart('Flujo (SMF3200)', 'Tiempo', 'sml', _smf3200Data),
+                    _buildChart('Flujo (SMF3019)', 'Tiempo', 'sml', _smf3200Data),
                     _buildChart('PM2.5', 'Tiempo', 'PPM', _pm25Data),
                   ],
                 ),
