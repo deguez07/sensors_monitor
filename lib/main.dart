@@ -43,7 +43,7 @@ class HomeScreen extends StatefulWidget {
 class _HomeScreenState extends State<HomeScreen> {
 
   /// The max number of entries to display in a chart
-  static const maxEntries = 10;
+  static const maxEntries = 16;
 
   /// The line of data read by the serial interface
   String _dataLine = '';
@@ -82,12 +82,12 @@ class _HomeScreenState extends State<HomeScreen> {
         ),
         rangePadding: ChartRangePadding.additional
       ),
-      series: <SplineSeries<DataMeasurement, DateTime>> [
-        SplineSeries<DataMeasurement, DateTime>(
+      series: <LineSeries<DataMeasurement, DateTime>> [
+        LineSeries<DataMeasurement, DateTime>(
           dataSource: chartData, 
           xValueMapper: (data, _) => data.timestamp, 
           yValueMapper: (data, _) => data.value,
-          animationDuration: 0
+          animationDuration: 100
         )
       ]
     );
@@ -160,7 +160,7 @@ class _HomeScreenState extends State<HomeScreen> {
       print('Error could not open /dev/ttyUSB0');
     }
 
-    _dataFetchTimer = Timer.periodic(const Duration(milliseconds: 20), (timer) {
+    _dataFetchTimer = Timer.periodic(const Duration(milliseconds: 10), (timer) {
       if (_serialPort == null) {
         return;
       }
@@ -172,7 +172,7 @@ class _HomeScreenState extends State<HomeScreen> {
           final byteChar = String.fromCharCode(byteData);
 
           if (byteChar == '\n') {
-            print(_dataLine);
+            // print(_dataLine);
             _parseAndAppendData(_dataLine);
             _dataLine = '';
           } else {
